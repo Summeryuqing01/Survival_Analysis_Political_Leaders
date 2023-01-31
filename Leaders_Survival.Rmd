@@ -1,0 +1,263 @@
+---
+title: "Final Project"
+author: "yuqingxia"
+date: "2022-10-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+1. Introduction:
+
+  This data set documents the party leadership succession in 23 parliamentary democracies(as defined by Lijphart 1999). There are 25 columns and 4559 rows in the data, it includes the country, party information, name, sex, and term information about the leaders, and it also includes a status vector which use one to indicate the leader is still in office and 0 to indicate that they are out of office. There are, however, many missing values in the data set due to the lack of information for some countries.
+  In this project, we use tenure as the time variable which shows the leader's time in office (in years), and status as our censoring data with 1 representing the leader's still in office, 0 representing the leader has finished their term.
+  The original paper studied the effect of succession on terms, in this project, however, we would like to find out if there's any relationship between time and the length of tenure (for example, the more recent the election/ in office year is, the shorter the term is).(Horiuchi and Laing, 2015)
+
+
+```{r}
+# load the libraries
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(survival)
+library(survminer)
+library(simPH)
+library(MASS)
+```
+
+```{r}
+# Read in the data
+leaders <- read.csv("Karabulut_PartyLeadersData.csv")
+dim(leaders)
+```
+```{r}
+# X.1 to X.4 contains no values so we get rid of them
+leaders <- subset(leaders,select = -c(X.1,X.2,X.3,X.4))
+```
+
+
+2. Model Fitting:
+  Before we start the survival analysis, for the purpose of censoring, we need to change the status of leaders so that 0 represents that the leader is still in office and 1 represents that the leader has finished their term.
+  The Kalpan Meier estimate shows that the median for the tenure is 4 years, and the plot seems to have an exponential pattern: the survival rate drops after for the first 10 years then the curve becomes more flat.
+```{r}
+leaders$status <- ifelse(leaders$status ==  0, 1, 0)
+fit <- survfit(Surv(tenure, status) ~ 1, data = leaders)
+fit
+# Drawing curves
+ggsurvplot(fit, palette ="#2E9FDF")
+```
+  For the first step, I used step AIC to get the variables in my coxph model. The lower bound for the model is a model with just intercept, and for the upper bound, I chose 9 variables out of the 23. Besides some obvious insignificant ones such as country_name and leader_name, I also exclude out_year and party_dissolved from my variable. Since out_year = in_year + tenure, it is highly correlated to the tenure and in_year, so it would be shown as statistically significant no matter it is actually significant or not. Party_dissolved is excluded because it is a time in the future, after the election time and the year in office, and we don't want to use future data to predict.
+  After running the step AIC, we get a coxph model with a single variable "age". The likelihood ratio test for the model is 2e-16, which is much smaller than 0.05, so the model is significant. Use age as confounding variable, we find out that the interaction term of "age" and "in_year" has p-value smaller than 0.05 so it is significant. However, the p-value of cox zph test for "in_year" is smaller than 0.05, meaning that the hazard ratio is not constant thus "in_year" doesn't pass the proportional hazard ratio test.(Kleinbaum and Klein, pg 162-188) To solve this issue, I divided "in_year" into 4 time interval and stratify on it.(Kleinbaum and Klein, pg 202-228)
+  After stratifying on "in_year", we get a model of strata(in_year) interacting with age, and the interaction term is smaller than 0.05 so it is significant. The model also passes the proportional hazard ratio test.
+```{r}
+model <- coxph(Surv(tenure, status) ~1, data = na.omit(leaders))
+model.stp <- stepAIC(model,
+                     scope = list(upper = ~country_id+continent+election_year
+                                  +party_id+party_founded + sex + age +sysofgov,
+                                  lower = ~1),
+                     direction = "forward",
+                     trace = TRUE)
+```
+  Use age as confounding variable                                                                                               
+```{r}
+linear.model <- coxph(Surv(tenure, status) ~ age, data = leaders)
+summary(linear.model)
+```
+```{r}
+in.year <- coxph(Surv(tenure, status) ~ age+in_year, data = leaders)
+anova(in.year)
+```
+```{r}
+inter.year <- coxph(Surv(tenure, status) ~ age*in_year, data = leaders)
+anova(inter.year)
+summary(inter.year)
+```
+
+```{r}
+cox.zph(inter.year)
+zph <- cox.zph(inter.year)
+plot(zph)
+```
+```{r}
+# Sort the dataset into four time intervals based on "in_year"
+leaders2 <- leaders
+i = 1
+leaders2$in_year2 <- ""
+while(i <= length(leaders2$in_year)){
+  if(is.na(leaders2$in_year[i])){
+    leaders2$in_year2[i] = NA
+  }else if(leaders2$in_year[i]>=1970 & leaders2$in_year[i]<1990){
+    leaders2$in_year2[i] = "1970-1990"
+  }else if(leaders2$in_year[i]>=1990 & leaders2$in_year[i]<2000){
+    leaders2$in_year2[i] = "1990-2000"
+  }else if(leaders2$in_year[i]>=2000 & leaders2$in_year[i]<2010){
+    leaders2$in_year2[i] = "2000-2010"
+  }else if(leaders2$in_year[i]>= 2010 & leaders2$in_year[i]<2020){
+    leaders2$in_year2[i] = "2010-2020"
+  }
+  i = i+1
+}
+```
+```{r}
+# ggplot before stratification
+cloglog <- function(x){log(-log(x))}
+ggsurvplot(survfit(Surv(tenure,status)~in_year2,data=leaders2),
+           fun="cloglog")
+```
+
+
+```{r}
+strata.model <- coxph(Surv(tenure, status) ~ strata(in_year2)*age, 
+                      data = leaders2)
+summary(strata.model)
+anova(strata.model)
+cox.zph(strata.model)
+```
+
+
+```{r}
+fit <- survfit(strata.model,data = leaders2,newdata = leaders2[c(1,2,6,28),])
+ggsurvplot(fit)
+```
+```{r}
+cox.zph(strata.model)
+```
+
+
+3. Conclusion
+  The hazard ratios are given by exp(coef) from the summary report, and the 95% intervals are given by lower.95 and  upper.95 from the summary table. Overall, variable "age" has a ratio greater than 1, meaning that the hazard rate increases as age increases. The hazard ratios of interaction terms are reflected in the graph as well: the hazard rate for the age's effect depending on "in_year" is bigger in more recent years. The coefficient of hazard ration decreases by 0.002887 when the leader starts their term in 1990-2000 compared to control condition; the coefficient of hazard ration decreases by 0.008552 when the leader starts their term in 2000-2010; and the The coefficient of hazard ration decreases by 0.017822 when the leader starts their term in 2010-2020, however, this is probably affected by the censoring since many of the leaders who started their term between 2010-2020 haven't exited the office yet.
+```{r}
+summary(strata.model)
+```
+
+
+
+
+4. Recurrent Model
+  For the previous models, have assumed that the event of interest can occur only once for a given subject. However, in this data set the event of interest is not death, so a subject may experience an event several times over follow-up. In the case of the leaders data set, the event of interest is the leader leaves the office, so instead of treating each event as occur only once, we can assess the relationship of relevant predictors to the rate in which events are occurring by creating a recurrent model, and the subject can be a political leader, a party, or a country.
+  The following code examine the occurrence of events when the subjects are leaders and when the subject are parties. As we can see, there are only 7 parties have more than 1 event, which is probably due to the lack of party information in the data set, making it hard to count the actual leaders' occurrence. We can model the recurrent event with leaders or countries as subject. Each subject (country or leader) can have many events, so it's not efficient to measure the time till each event. I opt out the marginal models for the following models.
+```{r}
+count_rec_leaders <-leaders2 %>% group_by(country, leader_name) %>% count() %>% filter(n==2, leader_name!="")
+dim(count_rec_leaders)
+```
+```{r}
+count_rec_party <- leaders2 %>% group_by(country, party_name) %>% count() %>% filter(n>=2, party_name!="")
+dim(count_rec_party)
+```
+
+  There are three main types of recurrent events model: marginal, counting process, and gap. The marginal model focuses on total survival time from study entry until the occurrence of a specific event. With Gap Time, the time until the  previous event does not influence the composition of the risk set for the later event. In a counting process, recurrent events are treated as identical. (Kleinbaum and Klein, pg 366-372)
+  When we treat leaders as the subject, the order of the term is important so we use gap model. I don't use stratified counting process model because I want to avoid stratify on enum. To avoid correlation, we can use "enum" which indicates the order of the event instead of "in_year". The model has a likelihood ratio test p-value of 2e-07, so enum has a significant impact on the length of the term. The model also satisfies the proportional hazard assumption. "enum" has a coefficient of 0.29128, and the exponential of coefficient is 1.33814, meaning that the more recent term is, the shorter the term.
+  This model only gives us analysis about the terms in regard to different terms of the same leaders, so what about the overall change in the length of term? To answer this, we model country as the subject.
+  
+```{r}
+leaders_recurrent1 <- leaders2 %>%
+  arrange(country,leader_name,in_year) %>%
+  filter(leader_name != "")
+
+leaders_recurrent1$enum <- 0
+i = 1
+n  = 1
+while(i < length(leaders_recurrent1$leader_name)){
+  leaders_recurrent1$enum[i] = n
+  if(leaders_recurrent1$leader_name[i+1] == leaders_recurrent1$leader_name[i]){
+    n = n+1
+  }else{
+    n = 1
+  }
+  i = i+1
+}
+```
+```{r}
+# while loop for creating tstart and tstop, the first event of the subject starts at 0
+# and stops at time = "tenure",  then the second event starts at the stopping point of previous
+# event, and stops at starting time plus "tenure" and so on...
+leaders_recurrent1$tstart <- 0
+leaders_recurrent1$tstop <- leaders_recurrent1$tenure
+
+i = 1
+while(i < length(leaders_recurrent1$leader_name)){
+  if(leaders_recurrent1$leader_name[i+1] == leaders_recurrent1$leader_name[i]){
+    leaders_recurrent1$tstart[i+1] = leaders_recurrent1$tstop[i]
+    leaders_recurrent1$tstop[i+1] = leaders_recurrent1$tstop[i]+leaders_recurrent1$tenure[i+1]
+    
+  }
+  i = i+1
+}
+```
+
+```{r}
+leaders.gap <- coxph(Surv(tstop-tstart, status)~ enum, 
+                  data = leaders_recurrent1)
+summary(leaders.gap)
+cox.zph(leaders.gap)
+```
+
+
+  When we model countries as the subject, we again assume that the order matters. Similar to the leaders model, we tried to build a gap model first. However, enum in gap model fails to satisfy the coxph assumption, and since we used "in_year" to order the data, we don't have a variable for time. We have to resort to assuming that the order doesn't matter. We use the counting process since we assume that every event is the same and order doesn't matter. By using age as a confounding variable, we get that "in_year" has a p-value that's greater than 0.05 (in anova table). We also calculated the p-value for interaction term  and it's also bigger than 0.05. So we conclude that, even though a leader's previous number of terms have an effect on their term length, there doesn't seem to be a general trend of tenure to be longer or shorter over time.
+```{r}
+leaders_recurrent2 <- leaders2 %>%
+  arrange(country)
+```
+```{r}
+leaders_recurrent2$tstart <- 0
+leaders_recurrent2$tstop <- leaders_recurrent2$tenure
+```
+```{r}
+# counting episode for each country
+leaders_recurrent2$enum <- 0
+i = 1
+n  =  1
+while(i < length(leaders_recurrent2$country)){
+  leaders_recurrent2$enum[i] = n
+  if(leaders_recurrent2$country[i+1] == leaders_recurrent2$country[i]){
+    n = n+1
+  }else{
+    n = 1
+  }
+  i = i+1
+}
+```
+
+```{r}
+# while loop for creating tstart and tstop, the first event of the subject starts at 0
+# and stops at time = "tenure",  then the second event starts at the stopping point of previous
+# event, and stops at starting time plus "tenure" and so on...
+i = 1
+while(i < length(leaders_recurrent2$country)){
+  if(leaders_recurrent2$country[i+1] == leaders_recurrent2$country[i]){
+    leaders_recurrent2$tstart[i+1] = leaders_recurrent2$tstop[i]
+    leaders_recurrent2$tstop[i+1] = leaders_recurrent2$tstop[i]+leaders_recurrent2$tenure[i+1]
+    
+  }
+  i = i+1
+}
+```
+
+
+```{r}
+country.cp <- coxph(Surv(tstart, tstop, status) ~ age+in_year,
+                    data = leaders_recurrent2)
+summary(country.cp)
+anova(country.cp)
+cox.zph(country.cp)
+```
+```{r}
+country.cp <- coxph(Surv(tstart, tstop, status) ~ age*in_year,
+                    data = leaders_recurrent2)
+summary(country.cp)
+anova(country.cp)
+cox.zph(country.cp)
+```
+
+
+
+Citation:
+
+  Horiuchi, Y., Laing, M., & Hart, P. ‘t. (2015). Hard acts to follow: Predecessor effects on party leader survival. Party Politics, 21(3), 357–366. https://doi.org/10.1177/1354068812472577
+
+  Kleinbaum, David G., and Mitchel. Klein. Survival Analysis A Self-Learning Text, Third Edition. 3rd ed. 2012. New York, NY: Springer New York, 2012. Web.
+
+
